@@ -105,6 +105,7 @@ shard alongside the deployment's data in `sgdNNN`.
 | `use_bytea_prefix`      | `boolean!` |                                                      |
 | `start_block_hash`      | `bytea`    | Parent of the smallest start block from the manifest |
 | `start_block_number`    | `int4`     |                                                      |
+| `history_blocks`        | `int4!`    | How many blocks of history to keep                   |
 
 ### `subgraph_deployment_assignment`
 

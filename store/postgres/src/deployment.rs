@@ -121,6 +121,9 @@ table! {
         // Entity types that have a `causality_region` column.
         // Names stored as present in the schema, not in snake case.
         entities_with_causality_region -> Array<Text>,
+        // How many blocks of history to keep, defaults to `i32::max` for
+        // unlimited history
+        history_blocks -> Integer,
     }
 }
 
