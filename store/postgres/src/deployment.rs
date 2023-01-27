@@ -247,6 +247,16 @@ pub fn schema(conn: &PgConnection, site: &Site) -> Result<(Schema, bool), StoreE
         .map(|schema| (schema, use_bytea_prefix))
 }
 
+// Return how many blocks of history this subgraph should keep
+pub fn history_blocks(conn: &PgConnection, site: &Site) -> Result<BlockNumber, StoreError> {
+    use subgraph_manifest as sm;
+    sm::table
+        .select(sm::history_blocks)
+        .filter(sm::id.eq(site.id))
+        .first::<BlockNumber>(conn)
+        .map_err(StoreError::from)
+}
+
 pub fn manifest_info(
     conn: &PgConnection,
     site: &Site,
