@@ -5,6 +5,7 @@ use test_store::*;
 
 use graph::components::store::{
     DeploymentLocator, EntityKey, EntityOrder, EntityQuery, EntityType, PruneReporter,
+    PruningStrategy,
 };
 use graph::data::store::scalar;
 use graph::data::subgraph::schema::*;
@@ -446,6 +447,7 @@ fn prune() {
     fn check_at_block(
         store: &DieselSubgraphStore,
         src: &DeploymentLocator,
+        strategy: PruningStrategy,
         block: BlockNumber,
         exp: Vec<&str>,
     ) {
@@ -464,67 +466,79 @@ fn prune() {
             .into_iter()
             .map(|entity| entity.id().unwrap())
             .collect();
-        assert_eq!(act, exp, "different users visible at block {block}");
+        assert_eq!(
+            act, exp,
+            "different users visible at block {block} with {strategy}"
+        );
     }
 
-    async fn prune(store: &DieselSubgraphStore, src: &DeploymentLocator) -> Result<(), StoreError> {
+    async fn prune(
+        store: &DieselSubgraphStore,
+        src: &DeploymentLocator,
+        strategy: PruningStrategy,
+    ) -> Result<(), StoreError> {
         struct Progress;
         impl PruneReporter for Progress {}
         let reporter = Box::new(Progress);
 
-        store.prune(reporter, src, None, 1, 1.1).await.map(|_| ())
+        store
+            .prune(reporter, src, None, 1, 1.1, strategy)
+            .await
+            .map(|_| ())
     }
 
-    run_test(|store, src| async move {
-        store
-            .set_history_blocks(&src, -3, 10)
-            .expect_err("history_blocks can not be set to a negative number");
+    for strategy in [PruningStrategy::Copy, PruningStrategy::Delete] {
+        run_test(move |store, src| async move {
+            store
+                .set_history_blocks(&src, -3, 10)
+                .expect_err("history_blocks can not be set to a negative number");
 
-        store
-            .set_history_blocks(&src, 10, 10)
-            .expect_err("history_blocks must be bigger than reorg_threshold");
+            store
+                .set_history_blocks(&src, 10, 10)
+                .expect_err("history_blocks must be bigger than reorg_threshold");
 
-        // Add another version for user 2 at block 4
-        let user2 = create_test_entity(
-            "2",
-            USER,
-            "Cindini",
-            "dinici@email.com",
-            44_i32,
-            157.1,
-            true,
-            Some("red"),
-        );
-        transact_and_wait(&store, &src, BLOCKS[5].clone(), vec![user2])
-            .await
-            .unwrap();
+            // Add another version for user 2 at block 4
+            let user2 = create_test_entity(
+                "2",
+                USER,
+                "Cindini",
+                "dinici@email.com",
+                44_i32,
+                157.1,
+                true,
+                Some("red"),
+            );
+            transact_and_wait(&store, &src, BLOCKS[5].clone(), vec![user2])
+                .await
+                .unwrap();
 
-        // Setup and the above addition create these user versions:
-        // id | versions
-        // ---+---------
-        //  1 | [0,)
-        //  2 | [1,5) [5,)
-        //  3 | [1,2) [2,)
+            // Setup and the above addition create these user versions:
+            // id | versions
+            // ---+---------
+            //  1 | [0,)
+            //  2 | [1,5) [5,)
+            //  3 | [1,2) [2,)
 
-        // Forward block ptr to block 6
-        transact_and_wait(&store, &src, BLOCKS[6].clone(), vec![])
-            .await
-            .unwrap();
+            // Forward block ptr to block 6
+            transact_and_wait(&store, &src, BLOCKS[6].clone(), vec![])
+                .await
+                .unwrap();
 
-        // Keep 3 blocks of history, i.e. blocks 4..6
-        store.set_history_blocks(&src, 3, 0).unwrap();
+            // Keep 3 blocks of history, i.e. blocks 4..6
+            store.set_history_blocks(&src, 3, 0).unwrap();
 
-        // Pruning only removes the [1,2) version of user 3
-        prune(&store, &src).await.expect("pruning works");
+            // Pruning only removes the [1,2) version of user 3
+            prune(&store, &src, strategy).await.expect("pruning works");
 
-        // Check which versions exist at every block, even if they are
-        // before the new earliest block, since we don't have a convenient
-        // way to load all entity versions with their block range
-        check_at_block(&store, &src, 0, vec!["1"]);
-        check_at_block(&store, &src, 1, vec!["1", "2"]);
-        for block in 2..=5 {
-            check_at_block(&store, &src, block, vec!["1", "2", "3"]);
-        }
-        Ok(())
-    })
+            // Check which versions exist at every block, even if they are
+            // before the new earliest block, since we don't have a convenient
+            // way to load all entity versions with their block range
+            check_at_block(&store, &src, strategy, 0, vec!["1"]);
+            check_at_block(&store, &src, strategy, 1, vec!["1", "2"]);
+            for block in 2..=5 {
+                check_at_block(&store, &src, strategy, block, vec!["1", "2", "3"]);
+            }
+            Ok(())
+        })
+    }
 }

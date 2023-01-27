@@ -7,6 +7,7 @@ pub use entity_cache::{EntityCache, ModificationsAndCache};
 use diesel::types::{FromSql, ToSql};
 pub use err::StoreError;
 use itertools::Itertools;
+use strum_macros::Display;
 pub use traits::*;
 
 use futures::stream::poll_fn;
@@ -1129,6 +1130,22 @@ pub struct VersionStats {
 /// of the pruning procedure to users
 #[allow(unused_variables)]
 pub trait PruneReporter: Send + 'static {
+    /// A pruning run has started. It will use the given `strategy` and
+    /// remove `history_frac` part of the blocks of the deployment, which
+    /// amounts to `history_blocks` many blocks.
+    ///
+    /// Before pruning, the subgraph has data for blocks from
+    /// `earliest_block` to `latest_block`
+    fn start_prune(
+        &mut self,
+        strategy: PruningStrategy,
+        history_frac: f64,
+        history_blocks: BlockNumber,
+        earliest_block: BlockNumber,
+        latest_block: BlockNumber,
+    ) {
+    }
+
     fn start_analyze(&mut self) {}
     fn start_analyze_table(&mut self, table: &str) {}
     fn finish_analyze_table(&mut self, table: &str) {}
@@ -1148,7 +1165,23 @@ pub trait PruneReporter: Send + 'static {
     }
     fn finish_switch(&mut self) {}
 
+    fn delete_start(&mut self, earliest_block: BlockNumber) {}
+    fn delete_batch(&mut self, table: &str, rows: usize, total_rows: usize, finished: bool) {}
+
     fn finish_prune(&mut self) {}
+}
+
+/// Select how pruning should be done
+#[derive(Clone, Copy, Display)]
+pub enum PruningStrategy {
+    /// Copy the data we want to keep to new tables and swap them out for
+    /// the existing tables
+    Copy,
+    /// Delete unneeded data from the existing tables
+    Delete,
+    /// Estimate how much data we will remove and use either copying or
+    /// deleting, depending on which will be faster
+    Auto,
 }
 
 /// Represents an item retrieved from an

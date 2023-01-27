@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crate::bail;
+
 use super::*;
 
 #[derive(Clone)]
@@ -94,6 +96,13 @@ pub struct EnvVarsStore {
     /// Set by `GRAPH_STORE_BATCH_TARGET_DURATION` (expressed in seconds).
     /// The default is 180s.
     pub batch_target_duration: Duration,
+
+    /// How much history a subgraph with limited history can accumulate
+    /// before it will be pruned. Setting this to 1.1 means that the
+    /// subgraph will be pruned every time it contains 10% more history (in
+    /// blocks) than its history limit. The default value is 1.2 and the
+    /// value must be at least 1.01
+    pub history_slack_factor: f64,
 }
 
 // This does not print any values avoid accidentally leaking any sensitive env vars
@@ -132,6 +141,7 @@ impl From<InnerStore> for EnvVarsStore {
             connection_idle_timeout: Duration::from_secs(x.connection_idle_timeout_in_secs),
             write_queue_size: x.write_queue_size,
             batch_target_duration: Duration::from_secs(x.batch_target_duration_in_secs),
+            history_slack_factor: x.history_slack_factor.0,
         }
     }
 }
@@ -179,4 +189,22 @@ pub struct InnerStore {
     write_queue_size: usize,
     #[envconfig(from = "GRAPH_STORE_BATCH_TARGET_DURATION", default = "180")]
     batch_target_duration_in_secs: u64,
+    #[envconfig(from = "GRAPH_STORE_HISTORY_SLACK_FACTOR", default = "1.2")]
+    history_slack_factor: HistorySlackF64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct HistorySlackF64(f64);
+
+impl FromStr for HistorySlackF64 {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let f = s.parse::<f64>()?;
+        if f < 1.01 {
+            bail!("invalid value: {s} must be bigger than 1.01");
+        } else {
+            Ok(HistorySlackF64(f))
+        }
+    }
 }

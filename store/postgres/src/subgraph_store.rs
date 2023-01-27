@@ -17,7 +17,7 @@ use graph::{
         server::index_node::VersionInfo,
         store::{
             self, BlockStore, DeploymentLocator, DeploymentSchemaVersion,
-            EnsLookup as EnsLookupTrait, PruneReporter, SubgraphFork,
+            EnsLookup as EnsLookupTrait, PruneReporter, PruningStrategy, SubgraphFork,
         },
     },
     constraint_violation,
@@ -1133,6 +1133,7 @@ impl SubgraphStoreInner {
         history_blocks: Option<BlockNumber>,
         reorg_threshold: BlockNumber,
         prune_ratio: f64,
+        strategy: PruningStrategy,
     ) -> Result<Box<dyn PruneReporter>, StoreError> {
         // Find the store by the deployment id; otherwise, we could only
         // prune the active copy of the deployment with `deployment.hash`
@@ -1140,7 +1141,14 @@ impl SubgraphStoreInner {
         let store = self.for_site(&site)?;
 
         store
-            .prune(reporter, site, history_blocks, reorg_threshold, prune_ratio)
+            .prune(
+                reporter,
+                site,
+                history_blocks,
+                reorg_threshold,
+                prune_ratio,
+                strategy,
+            )
             .await
     }
 

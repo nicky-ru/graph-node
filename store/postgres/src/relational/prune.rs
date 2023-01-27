@@ -428,8 +428,67 @@ impl Layout {
         let tables = prunable_src.iter().collect();
         self.analyze_tables(conn, reporter, tables, cancel)?;
 
-        reporter.finish_prune();
+        Ok(())
+    }
 
+    pub fn prune_by_deleting(
+        &self,
+        _logger: &Logger,
+        reporter: &mut dyn PruneReporter,
+        conn: &PgConnection,
+        earliest_block: BlockNumber,
+        prune_ratio: f64,
+        cancel: &CancelHandle,
+    ) -> Result<(), CancelableError<StoreError>> {
+        let stats = self.version_stats(conn, reporter, false, cancel)?;
+
+        let prunable_tables = self.prunable_tables(&stats, prune_ratio);
+
+        reporter.delete_start(earliest_block);
+        for (table, _) in prunable_tables {
+            cancel.check_cancel()?;
+
+            // Determine the last vid that we need to delete
+            let VidRange { min_vid, max_vid } = sql_query(&format!(
+                "select coalesce(min(vid), 0) as min_vid, \
+                            coalesce(max(vid), -1) as max_vid from {src} \
+                     where coalesce(upper(block_range), 2147483647) <= $1 \
+              and block_range && int4range(null, $1)",
+                src = table.qualified_name,
+            ))
+            .bind::<Integer, _>(earliest_block)
+            .get_result::<VidRange>(conn)?;
+
+            let mut batch_size = AdaptiveBatchSize::new(&table);
+            // The first vid we still need to copy
+            let mut next_vid = min_vid;
+            let mut total_rows = 0;
+            while next_vid <= max_vid {
+                let start = Instant::now();
+                let rows = sql_query(format!(
+                    "delete from {} \
+                          where coalesce(upper(block_range), 2147483647) <= $1 \
+                            and vid >= $2 and vid < $2 + $3",
+                    table.qualified_name
+                ))
+                .bind::<Integer, _>(earliest_block)
+                .bind::<BigInt, _>(next_vid)
+                .bind::<BigInt, _>(&batch_size)
+                .execute(conn)?;
+
+                total_rows += rows;
+                next_vid += batch_size.size;
+
+                batch_size.adapt(start.elapsed());
+
+                reporter.delete_batch(
+                    table.name.as_str(),
+                    rows as usize,
+                    total_rows,
+                    next_vid > max_vid,
+                );
+            }
+        }
         Ok(())
     }
 }

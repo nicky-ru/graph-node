@@ -5,7 +5,9 @@ use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, PooledConnection};
 use graph::anyhow::Context;
 use graph::blockchain::block_stream::FirehoseCursor;
-use graph::components::store::{EntityKey, EntityType, PruneReporter, StoredDynamicDataSource};
+use graph::components::store::{
+    EntityKey, EntityType, PruneReporter, PruningStrategy, StoredDynamicDataSource,
+};
 use graph::components::versions::VERSIONS;
 use graph::data::query::Trace;
 use graph::data::subgraph::{status, SPEC_VERSION_0_0_6};
@@ -15,6 +17,7 @@ use graph::prelude::{
     SubgraphDeploymentEntity,
 };
 use graph::semver::Version;
+use itertools::Itertools;
 use lru_time_cache::LruCache;
 use rand::{seq::SliceRandom, thread_rng};
 use std::borrow::Cow;
@@ -884,6 +887,7 @@ impl DeploymentStore {
         history_blocks: Option<BlockNumber>,
         reorg_threshold: BlockNumber,
         prune_ratio: f64,
+        strategy: PruningStrategy,
     ) -> Result<Box<dyn PruneReporter>, StoreError> {
         let store = self.clone();
         self.with_conn(move |conn, cancel| {
@@ -907,7 +911,7 @@ impl DeploymentStore {
 
             let final_block = state.latest_block.number - reorg_threshold;
             if final_block <= earliest_block {
-                return Err(constraint_violation!("the earliest block {} must be at least {} blocks before the current latest block {}", earliest_block, reorg_threshold, state.latest_block.number).into());
+                return Err(constraint_violation!("the earliest block {} must be at least {} blocks before the current latest block {}", state.earliest_block_number, reorg_threshold, state.latest_block.number).into());
             }
 
             cancel.check_cancel()?;
@@ -918,15 +922,46 @@ impl DeploymentStore {
 
             cancel.check_cancel()?;
 
-            layout.prune_by_copying(
-                &store.logger,
-                reporter.as_mut(),
-                conn,
-                earliest_block,
-                final_block,
-                prune_ratio,
-                cancel,
-            )?;
+            // Estimate how much data we will throw away; we assume that
+            // entity versions are distributed evenly across all blocks so
+            // that `history_pct` will tell us how much of that data pruning
+            // will remove.
+            //
+            // If we will remove more than half the data, we copy the
+            // remaining data to new tables since that should be faster
+            let history_pct : f64 = 1.0 - history_blocks as f64 / (state.latest_block.number - state.earliest_block_number) as f64;
+            let strategy = match strategy {
+                PruningStrategy::Copy|PruningStrategy::Delete => strategy,
+                PruningStrategy::Auto => if history_pct > 0.5 { PruningStrategy::Copy } else { PruningStrategy::Delete }
+            };
+
+            reporter.start_prune(strategy, history_pct, history_blocks, state.earliest_block_number, state.latest_block.number);
+            match strategy {
+                PruningStrategy::Copy => {
+                    layout.prune_by_copying(
+                        &store.logger,
+                        reporter.as_mut(),
+                        conn,
+                        earliest_block,
+                        final_block,
+                        prune_ratio,
+                        cancel,
+                    )?;
+                },
+                PruningStrategy::Delete => {
+                    layout.prune_by_deleting(
+                        &store.logger,
+                        reporter.as_mut(),
+                        &conn,
+                        earliest_block,
+                        prune_ratio,
+                        cancel,
+                    )?;
+                },
+                PruningStrategy::Auto => unreachable!(),
+            }
+            reporter.finish_prune();
+
             Ok(reporter)
         })
         .await
@@ -1124,7 +1159,8 @@ impl DeploymentStore {
     }
 
     pub(crate) fn transact_block_operations(
-        &self,
+        self: &Arc<Self>,
+        logger: &Logger,
         site: Arc<Site>,
         block_ptr_to: &BlockPtr,
         firehose_cursor: &FirehoseCursor,
@@ -1140,14 +1176,14 @@ impl DeploymentStore {
             self.get_conn()?
         };
 
-        let event = deployment::with_lock(&conn, &site, || {
-            conn.transaction(|| -> Result<_, StoreError> {
-                // Emit a store event for the changes we are about to make. We
-                // wait with sending it until we have done all our other work
-                // so that we do not hold a lock on the notification queue
-                // for longer than we have to
-                let event: StoreEvent = StoreEvent::from_mods(&site.deployment, mods);
+        // Emit a store event for the changes we are about to make. We
+        // wait with sending it until we have done all our other work
+        // so that we do not hold a lock on the notification queue
+        // for longer than we have to
+        let event: StoreEvent = StoreEvent::from_mods(&site.deployment, mods);
 
+        let (layout, earliest_block) = deployment::with_lock(&conn, &site, || {
+            conn.transaction(|| -> Result<_, StoreError> {
                 // Make the changes
                 let layout = self.layout(&conn, site.clone())?;
 
@@ -1180,7 +1216,7 @@ impl DeploymentStore {
                     )?;
                 }
 
-                deployment::transact_block(
+                let earliest_block = deployment::transact_block(
                     &conn,
                     &site,
                     block_ptr_to,
@@ -1189,9 +1225,31 @@ impl DeploymentStore {
                     count,
                 )?;
 
-                Ok(event)
+                Ok((layout, earliest_block))
             })
         })?;
+
+        if block_ptr_to.number as f64
+            > earliest_block as f64
+                + layout.history_blocks as f64 * ENV_VARS.store.history_slack_factor
+        {
+            let this = self.clone();
+
+            let reorg_threshold = ENV_VARS.reorg_threshold;
+            let prune_ratio: f64 = 0.0;
+            let history_blocks = layout.history_blocks;
+
+            let reporter = OngoingPruneReporter::new(logger.cheap_clone());
+
+            graph::block_on(this.prune(
+                reporter,
+                site,
+                Some(history_blocks),
+                reorg_threshold,
+                prune_ratio,
+                PruningStrategy::Auto,
+            ))?;
+        }
 
         Ok(event)
     }
@@ -1751,4 +1809,149 @@ fn resolve_column_names<'a, T: AsRef<str>>(
             }
         })
         .collect()
+}
+
+/// A helper to log progress during pruning that is kicked off from
+/// `transact_block_operations`
+struct OngoingPruneReporter {
+    logger: Logger,
+    start: Instant,
+    analyze_start: Instant,
+    copy_final_start: Instant,
+    switch_start: Instant,
+    delete_start: Instant,
+    delete: bool,
+    tables: Vec<String>,
+}
+
+impl OngoingPruneReporter {
+    fn new(logger: Logger) -> Box<Self> {
+        Box::new(Self {
+            logger,
+            start: Instant::now(),
+            analyze_start: Instant::now(),
+            copy_final_start: Instant::now(),
+            switch_start: Instant::now(),
+            delete_start: Instant::now(),
+            delete: false,
+            tables: Vec::new(),
+        })
+    }
+}
+
+impl OngoingPruneReporter {
+    fn tables_as_string(&self) -> String {
+        if self.tables.is_empty() {
+            "none".to_string()
+        } else {
+            format!("[{}]", self.tables.iter().join(","))
+        }
+    }
+}
+
+impl PruneReporter for OngoingPruneReporter {
+    fn start_prune(
+        &mut self,
+        strategy: PruningStrategy,
+        history_frac: f64,
+        history_blocks: BlockNumber,
+        earliest_block: BlockNumber,
+        latest_block: BlockNumber,
+    ) {
+        self.start = Instant::now();
+        info!(&self.logger, "Start pruning historical entities";
+              "strategy" => strategy.to_string(),
+              "history_frac" => history_frac,
+              "history_blocks" => history_blocks,
+              "earliest_block" => earliest_block,
+              "latest_block" => latest_block);
+    }
+
+    fn start_analyze(&mut self) {
+        self.analyze_start = Instant::now()
+    }
+
+    fn finish_analyze(
+        &mut self,
+        _stats: &[graph::components::store::VersionStats],
+        analyzed: &[&str],
+    ) {
+        info!(&self.logger, "Analyzed {} tables", analyzed.len(); "time_s" => self.analyze_start.elapsed().as_secs());
+    }
+
+    fn copy_final_start(&mut self, _earliest_block: BlockNumber, _final_block: BlockNumber) {
+        self.copy_final_start = Instant::now();
+    }
+
+    fn copy_final_batch(&mut self, table: &str, _rows: usize, total_rows: usize, finished: bool) {
+        if finished {
+            self.tables.push(format!("{table} ({total_rows})"))
+        }
+    }
+
+    fn copy_final_finish(&mut self) {
+        info!(
+            &self.logger,
+            "Copied final entities";
+            "tables" => self.tables_as_string(),
+            "time_s" => self.copy_final_start.elapsed().as_secs()
+        )
+    }
+
+    fn start_switch(&mut self) {
+        self.tables.clear();
+        self.switch_start = Instant::now();
+    }
+
+    fn copy_nonfinal_start(&mut self, _table: &str) {}
+
+    fn copy_nonfinal_batch(
+        &mut self,
+        table: &str,
+        _rows: usize,
+        total_rows: usize,
+        finished: bool,
+    ) {
+        if finished {
+            self.tables.push(format!("{table} ({total_rows})"))
+        }
+    }
+
+    fn finish_switch(&mut self) {
+        info!(
+            &self.logger,
+            "Copied nonfinal entities";
+            "tables" => self.tables_as_string(),
+            "time_s" => self.switch_start.elapsed().as_secs()
+        )
+    }
+
+    fn delete_start(&mut self, earliest_block: BlockNumber) {
+        info!(
+            &self.logger,
+            "Delete entity versions before block {earliest_block}"
+        );
+        self.tables.clear();
+        self.delete_start = Instant::now();
+        self.delete = true;
+    }
+
+    fn delete_batch(&mut self, table: &str, _rows: usize, total_rows: usize, finished: bool) {
+        if finished {
+            self.tables.push(format!("{table} ({total_rows})"))
+        }
+    }
+
+    fn finish_prune(&mut self) {
+        if self.delete {
+            info!(
+                &self.logger,
+                "Finished pruning historical entities";
+                "tables" => self.tables_as_string(),
+                "time_s" => self.delete_start.elapsed().as_secs()
+            )
+        } else {
+            info!(&self.logger, "Finished pruning"; "time_s" => self.start.elapsed().as_secs())
+        }
+    }
 }

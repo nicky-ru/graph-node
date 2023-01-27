@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use graph::env::ENV_VARS;
+use graph::{components::store::PruningStrategy, env::ENV_VARS};
 use graph::{
     components::store::{PruneReporter, StatusStore},
     data::subgraph::status,
@@ -57,6 +57,19 @@ fn print_copy_row(table: &str, total_rows: usize, elapsed: Duration) {
 }
 
 impl PruneReporter for Progress {
+    fn start_prune(
+        &mut self,
+        strategy: PruningStrategy,
+        history_frac: f64,
+        history_blocks: BlockNumber,
+        earliest_block: BlockNumber,
+        latest_block: BlockNumber,
+    ) {
+        let history_pct = history_frac * 100.0;
+        let blocks = (latest_block - history_blocks) - earliest_block;
+        println!("Remove {history_pct:.2}% of history ({blocks} blocks) using {strategy}");
+    }
+
     fn start_analyze(&mut self) {
         print!("Analyze tables");
         self.analyze_start = Instant::now();
@@ -141,6 +154,19 @@ impl PruneReporter for Progress {
     fn finish_prune(&mut self) {
         println!("Finished pruning in {}s", self.start.elapsed().as_secs());
     }
+
+    fn delete_start(&mut self, earliest_block: BlockNumber) {
+        println!("Start deleting history before block {earliest_block}");
+    }
+
+    fn delete_batch(&mut self, table: &str, _rows: usize, total_rows: usize, finished: bool) {
+        print_copy_row(table, total_rows, self.table_start.elapsed());
+        if finished {
+            println!("");
+            self.table_start = Instant::now();
+        }
+        std::io::stdout().flush().ok();
+    }
 }
 
 pub async fn run(
@@ -190,6 +216,7 @@ pub async fn run(
             // finality
             ENV_VARS.reorg_threshold,
             prune_ratio,
+            PruningStrategy::Auto,
         )
         .await?;
 
