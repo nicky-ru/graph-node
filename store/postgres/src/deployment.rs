@@ -257,6 +257,20 @@ pub fn history_blocks(conn: &PgConnection, site: &Site) -> Result<BlockNumber, S
         .map_err(StoreError::from)
 }
 
+pub fn set_history_blocks(
+    conn: &PgConnection,
+    site: &Site,
+    history_blocks: BlockNumber,
+) -> Result<(), StoreError> {
+    use subgraph_manifest as sm;
+
+    update(sm::table.filter(sm::id.eq(site.id)))
+        .set(sm::history_blocks.eq(history_blocks))
+        .execute(conn)
+        .map(|_| ())
+        .map_err(StoreError::from)
+}
+
 pub fn manifest_info(
     conn: &PgConnection,
     site: &Site,
