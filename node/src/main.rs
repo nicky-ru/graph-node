@@ -733,7 +733,7 @@ fn ethereum_networks_as_chains(
                 Arc::new(EthereumBlockRefetcher {}),
                 Arc::new(adapter_selector),
                 runtime_adapter,
-                ethereum::ENV_VARS.reorg_threshold,
+                ENV_VARS.reorg_threshold,
                 is_ingestible,
             );
             (network_name.clone(), Arc::new(chain))
@@ -917,7 +917,7 @@ fn start_block_ingestor(
             // present in the DB.
             let block_ingestor = EthereumBlockIngestor::new(
                 logger,
-                ethereum::ENV_VARS.reorg_threshold,
+                ENV_VARS.reorg_threshold,
                 eth_adapter,
                 chain.chain_store(),
                 block_polling_interval,

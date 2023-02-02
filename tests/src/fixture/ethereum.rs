@@ -11,14 +11,14 @@ use graph::cheap_clone::CheapClone;
 use graph::firehose::{FirehoseEndpoint, FirehoseEndpoints};
 use graph::prelude::ethabi::ethereum_types::H256;
 use graph::prelude::web3::types::{Address, Log, Transaction, H160};
-use graph::prelude::{ethabi, tiny_keccak, LightEthereumBlock, LoggerFactory, NodeId};
+use graph::prelude::{ethabi, tiny_keccak, LightEthereumBlock, LoggerFactory, NodeId, ENV_VARS};
 use graph::{blockchain::block_stream::BlockWithTriggers, prelude::ethabi::ethereum_types::U64};
 use graph_chain_ethereum::network::EthereumNetworkAdapters;
+use graph_chain_ethereum::Chain;
 use graph_chain_ethereum::{
     chain::BlockFinality,
     trigger::{EthereumBlockTriggerType, EthereumTrigger},
 };
-use graph_chain_ethereum::{Chain, ENV_VARS};
 use graph_mock::MockMetricsRegistry;
 
 pub async fn chain(

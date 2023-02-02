@@ -137,7 +137,7 @@ pub async fn run(
             call_cache: chain_store.cheap_clone(),
             eth_adapters: Arc::new(eth_adapters2),
         }),
-        ethereum::ENV_VARS.reorg_threshold,
+        ENV_VARS.reorg_threshold,
         // We assume the tested chain is always ingestible for now
         true,
     );

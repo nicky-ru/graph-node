@@ -18,7 +18,8 @@ use self::graphql::*;
 use self::mappings::*;
 use self::store::*;
 use crate::{
-    components::subgraph::SubgraphVersionSwitchingMode, runtime::gas::CONST_MAX_GAS_PER_HANDLER,
+    components::{store::BlockNumber, subgraph::SubgraphVersionSwitchingMode},
+    runtime::gas::CONST_MAX_GAS_PER_HANDLER,
 };
 
 pub static UNSAFE_CONFIG: AtomicBool = AtomicBool::new(false);
@@ -205,6 +206,9 @@ pub struct EnvVars {
     /// Maximum number of Dynamic Data Sources after which a Subgraph will
     /// switch to using static filter.
     pub static_filters_threshold: usize,
+    /// Set by the environment variable `ETHEREUM_REORG_THRESHOLD`. The default
+    /// value is 250 blocks.
+    pub reorg_threshold: BlockNumber,
 }
 
 impl EnvVars {
@@ -261,6 +265,7 @@ impl EnvVars {
             external_http_base_url: inner.external_http_base_url,
             external_ws_base_url: inner.external_ws_base_url,
             static_filters_threshold: inner.static_filters_threshold,
+            reorg_threshold: inner.reorg_threshold,
         })
     }
 
@@ -377,6 +382,9 @@ struct Inner {
     // Setting this to be unrealistically high so it doesn't get triggered.
     #[envconfig(from = "GRAPH_STATIC_FILTERS_THRESHOLD", default = "100000000")]
     static_filters_threshold: usize,
+    // JSON-RPC specific.
+    #[envconfig(from = "ETHEREUM_REORG_THRESHOLD", default = "250")]
+    reorg_threshold: BlockNumber,
 }
 
 #[derive(Clone, Debug)]
