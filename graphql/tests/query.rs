@@ -2562,7 +2562,6 @@ fn query_error_if_cursor_does_not_contain_filters() {
     });
 }
 
-
 #[test]
 fn query_error_if_cursor_uses_incorrect_separator() {
     const QUERY: &str = "{
