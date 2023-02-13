@@ -179,7 +179,7 @@ fn build_cursor(
                             let id = get_id_from_decoded_cursor(val, field);
                             match id {
                                 Ok(id) => {
-                                    let filter = EntityFilter::AfterCursor(
+                                    let filter = EntityFilter::GreaterThan(
                                         "id".to_string(),
                                         Value::String(id.to_string()),
                                     );
@@ -225,7 +225,7 @@ fn build_cursor(
                             let id = get_id_from_decoded_cursor(val, field);
                             match id {
                                 Ok(id) => {
-                                    let filter = EntityFilter::BeforeCursor(
+                                    let filter = EntityFilter::LessThan(
                                         "id".to_string(),
                                         Value::String(id.to_string()),
                                     );
